@@ -1,0 +1,1704 @@
+openapi: 3.1.0
+info:
+  title: Movie Review Application API
+  version: 1.0.0
+  description: |
+    RESTful API for the Movie Review Application.
+    All state-changing endpoints require JWT authentication via httpOnly cookie.
+    Admin-only endpoints additionally require the `isAdmin` claim in the JWT payload.
+
+    **Authentication:** JWT access token is delivered as an httpOnly cookie named `access_token`.
+    The frontend never accesses the token value directly. On 401 responses, the client
+    should POST /auth/refresh to obtain a new access token.
+
+    **CSRF Protection:** All state-changing requests (POST, PUT, PATCH, DELETE) must include
+    the `X-CSRF-Token` header with the value read from the non-httpOnly `csrf_token` cookie.
+
+    **Rate Limits:** Limit headers are returned on all responses:
+    - `X-RateLimit-Limit`: request limit for the current window
+    - `X-RateLimit-Remaining`: remaining requests
+    - `X-RateLimit-Reset`: Unix timestamp when the window resets
+
+    **Pagination:** List endpoints return a standard envelope:
+    ```json
+    { "data": [...], "meta": { "page": 1, "limit": 20, "total": 150, "totalPages": 8 } }
+    ```
+
+  contact:
+    email: rawaldinesh13@dsu.ac.kr
+  license:
+    name: MIT
+
+servers:
+  - url: /api
+    description: Application backend (proxied via Nginx at /api)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECURITY SCHEMES
+# ─────────────────────────────────────────────────────────────────────────────
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+      description: |
+        JWT access token stored in httpOnly cookie. Set automatically by the browser
+        after successful OAuth login. Expires in 15 minutes. Use POST /auth/refresh
+        to renew silently.
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # REUSABLE SCHEMAS
+  # ─────────────────────────────────────────────────────────────────────────
+
+  schemas:
+
+    # ── Pagination ──────────────────────────────────────────────────────────
+
+    PaginationMeta:
+      type: object
+      required: [page, limit, total, totalPages]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 20
+        total:
+          type: integer
+          minimum: 0
+          example: 150
+        totalPages:
+          type: integer
+          minimum: 0
+          example: 8
+
+    # ── Error ────────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [statusCode, message]
+      properties:
+        statusCode:
+          type: integer
+          example: 400
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          example: "Validation failed"
+        error:
+          type: string
+          example: "Bad Request"
+        requestId:
+          type: string
+          format: uuid
+          description: Correlation ID for log tracing
+
+    # ── User ────────────────────────────────────────────────────────────────
+
+    UserPublic:
+      type: object
+      description: Public user profile (no PII beyond display name and avatar)
+      required: [id, displayName, avatarUrl, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        displayName:
+          type: string
+          example: "Dinesh Rawal"
+        avatarUrl:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://lh3.googleusercontent.com/a/..."
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-05-23T10:00:00Z"
+
+    UserMe:
+      allOf:
+        - $ref: '#/components/schemas/UserPublic'
+        - type: object
+          required: [email, isAdmin]
+          properties:
+            email:
+              type: string
+              format: email
+              description: Not displayed in public UI
+              example: "rawaldinesh13@dsu.ac.kr"
+            isAdmin:
+              type: boolean
+              example: false
+
+    # ── Genre ────────────────────────────────────────────────────────────────
+
+    Genre:
+      type: object
+      required: [id, name, tmdbGenreId]
+      properties:
+        id:
+          type: integer
+          example: 28
+        name:
+          type: string
+          example: "Action"
+        tmdbGenreId:
+          type: integer
+          example: 28
+
+    # ── Movie ────────────────────────────────────────────────────────────────
+
+    CastMember:
+      type: object
+      required: [name, character]
+      properties:
+        name:
+          type: string
+          example: "Brad Pitt"
+        character:
+          type: string
+          example: "Tyler Durden"
+        profilePath:
+          type: string
+          nullable: true
+          description: TMDB profile image path; prepend https://image.tmdb.org/t/p/w185
+          example: "/cckcYc2v0yh1tc9QjRelptcOBko.jpg"
+
+    MovieCard:
+      type: object
+      description: Compact movie representation for list/search views
+      required: [id, tmdbId, title, posterUrl, releaseDate, avgRating, ratingCount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tmdbId:
+          type: integer
+          example: 550
+        title:
+          type: string
+          example: "Fight Club"
+        posterUrl:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://image.tmdb.org/t/p/w500/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg"
+        releaseDate:
+          type: string
+          format: date
+          nullable: true
+          example: "1999-10-15"
+        releaseYear:
+          type: integer
+          nullable: true
+          example: 1999
+        avgRating:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 5
+          example: 4.3
+        ratingCount:
+          type: integer
+          minimum: 0
+          example: 247
+        genres:
+          type: array
+          items:
+            $ref: '#/components/schemas/Genre'
+
+    MovieDetail:
+      allOf:
+        - $ref: '#/components/schemas/MovieCard'
+        - type: object
+          required: [backdropUrl, overview, runtime, originalLanguage, director, cast, cachedAt]
+          properties:
+            backdropUrl:
+              type: string
+              format: uri
+              nullable: true
+              example: "https://image.tmdb.org/t/p/original/hZkgoQYus5vegHoetLkCJzb17zJ.jpg"
+            overview:
+              type: string
+              nullable: true
+              example: "An insomniac office worker and a devil-may-care soap maker..."
+            runtime:
+              type: integer
+              nullable: true
+              description: Runtime in minutes
+              example: 139
+            originalLanguage:
+              type: string
+              nullable: true
+              example: "en"
+            trailerUrl:
+              type: string
+              format: uri
+              nullable: true
+              example: "https://www.youtube.com/watch?v=SUXWAEX2jlg"
+            director:
+              type: string
+              nullable: true
+              example: "David Fincher"
+            cast:
+              type: array
+              maxItems: 10
+              items:
+                $ref: '#/components/schemas/CastMember'
+            editorialNote:
+              type: string
+              nullable: true
+              description: Admin-set editorial note (FR-083)
+            cachedAt:
+              type: string
+              format: date-time
+              description: When TMDB metadata was last refreshed
+
+    MovieCreateRequest:
+      type: object
+      required: [tmdbId]
+      properties:
+        tmdbId:
+          type: integer
+          description: TMDB movie ID to import
+          example: 550
+
+    MovieUpdateRequest:
+      type: object
+      description: Admin-only fields that can be overridden locally
+      properties:
+        editorialNote:
+          type: string
+          nullable: true
+          maxLength: 2000
+          example: "A masterpiece of psychological thriller filmmaking."
+
+    # ── Review ───────────────────────────────────────────────────────────────
+
+    Review:
+      type: object
+      required: [id, user, movieId, body, isHidden, flagCount, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user:
+          $ref: '#/components/schemas/UserPublic'
+        movieId:
+          type: string
+          format: uuid
+        body:
+          type: string
+          maxLength: 500
+          example: "A brutal, poetic film that stays with you long after the credits roll."
+        isHidden:
+          type: boolean
+          description: If true, review is hidden (admin action); only visible to admins
+          example: false
+        flagCount:
+          type: integer
+          minimum: 0
+          example: 0
+        isEdited:
+          type: boolean
+          description: True if updatedAt > createdAt
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-05-23T12:00:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-05-23T12:00:00Z"
+
+    ReviewCreateRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Review text. Must not be blank or whitespace-only.
+          example: "A brutal, poetic film that stays with you long after the credits roll."
+
+    ReviewUpdateRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: "Updated review text here."
+
+    ReviewModerationRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [hide, restore, delete]
+          description: >
+            hide: soft-hide the review (FR-072),
+            restore: un-hide the review (FR-073),
+            delete: permanently delete the review (FR-071)
+          example: "hide"
+        reason:
+          type: string
+          maxLength: 500
+          description: Optional admin note stored in audit log metadata
+          example: "Violates community guidelines"
+
+    # ── Rating ───────────────────────────────────────────────────────────────
+
+    Rating:
+      type: object
+      required: [id, userId, movieId, value, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        movieId:
+          type: string
+          format: uuid
+        value:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    RatingUpsertRequest:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Star rating (1-5). Replaces any existing rating by this user for this movie.
+          example: 5
+
+    # ── Admin ────────────────────────────────────────────────────────────────
+
+    AuditLogEntry:
+      type: object
+      required: [id, adminUserId, actionType, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        adminUserId:
+          type: string
+          format: uuid
+        actionType:
+          type: string
+          enum:
+            - REVIEW_DELETED
+            - REVIEW_HIDDEN
+            - REVIEW_RESTORED
+            - MOVIE_ADDED
+            - MOVIE_UPDATED
+            - MOVIE_DELETED
+            - MOVIE_SYNCED
+            - USER_PROMOTED
+            - USER_DEMOTED
+          example: "REVIEW_HIDDEN"
+        targetReviewId:
+          type: string
+          format: uuid
+          nullable: true
+        targetMovieId:
+          type: string
+          format: uuid
+          nullable: true
+        targetUserId:
+          type: string
+          format: uuid
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Extra context (e.g., reason, old values)
+        createdAt:
+          type: string
+          format: date-time
+
+    UserRoleUpdateRequest:
+      type: object
+      required: [isAdmin]
+      properties:
+        isAdmin:
+          type: boolean
+          description: true to promote to admin; false to revoke admin status
+          example: true
+
+    UserDataExport:
+      type: object
+      required: [profile, reviews, ratings, exportedAt]
+      properties:
+        profile:
+          $ref: '#/components/schemas/UserMe'
+        reviews:
+          type: array
+          items:
+            $ref: '#/components/schemas/Review'
+        ratings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Rating'
+        exportedAt:
+          type: string
+          format: date-time
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # REUSABLE PARAMETERS
+  # ─────────────────────────────────────────────────────────────────────────
+
+  parameters:
+    movieId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Internal movie UUID
+
+    reviewId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Internal review UUID
+
+    userId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Internal user UUID
+
+    pageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: Page number (1-based)
+
+    limitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Items per page
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # REUSABLE RESPONSES
+  # ─────────────────────────────────────────────────────────────────────────
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT access token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 401
+            message: "Unauthorized"
+            error: "Unauthorized"
+
+    Forbidden:
+      description: Authenticated but insufficient role (not admin)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 403
+            message: "Forbidden resource"
+            error: "Forbidden"
+
+    NotFound:
+      description: Requested resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 404
+            message: "Resource not found"
+            error: "Not Found"
+
+    UnprocessableEntity:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 422
+            message: ["body must not be empty", "body must be shorter than or equal to 500 characters"]
+            error: "Unprocessable Entity"
+
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 429
+            message: "ThrottlerException: Too Many Requests"
+
+    Conflict:
+      description: Resource already exists (e.g., duplicate review)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 409
+            message: "You have already submitted a review for this movie"
+            error: "Conflict"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+
+paths:
+
+  # ─── HEALTH ─────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns 200 when the API is running. Used by Docker health checks and Nginx upstream monitoring.
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  # ─── AUTH ────────────────────────────────────────────────────────────────────
+
+  /auth/google:
+    get:
+      tags: [Authentication]
+      summary: Initiate Google OAuth flow
+      description: |
+        Redirects the browser to Google's authorization endpoint.
+        Scopes requested: openid, email, profile.
+        The `state` parameter is set to a CSRF-safe random value stored in a session cookie.
+        No request body; the response is always a 302 redirect.
+      operationId: initiateGoogleOAuth
+      security: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional URL to redirect to after successful login (validated against allowed origins)
+      responses:
+        '302':
+          description: Redirect to Google authorization endpoint
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              example: "https://accounts.google.com/o/oauth2/v2/auth?..."
+
+  /auth/google/callback:
+    get:
+      tags: [Authentication]
+      summary: Google OAuth callback
+      description: |
+        Google redirects here after user consent. The backend exchanges the authorization
+        code for Google tokens, extracts the user profile, upserts the user in PostgreSQL,
+        issues JWT access token + refresh token as httpOnly cookies, and redirects to the
+        frontend home page (or the `redirect` URL from the initial request state).
+
+        On error (denied consent, invalid state): redirects to `/login?error=oauth_failed`.
+      operationId: googleOAuthCallback
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authorization code from Google
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+          description: CSRF state token matching the initiation request
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Present if user denied consent
+      responses:
+        '302':
+          description: Redirect to frontend after successful authentication
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              example: "/"
+            Set-Cookie:
+              schema:
+                type: array
+                items:
+                  type: string
+              description: |
+                Sets three cookies:
+                - `access_token`: JWT access token (httpOnly, Secure, SameSite=Strict, Max-Age=900)
+                - `refresh_token`: Refresh token (httpOnly, Secure, SameSite=Strict, Max-Age=604800)
+                - `csrf_token`: CSRF token (Secure, SameSite=Strict — NOT httpOnly, Max-Age=604800)
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Refresh access token
+      description: |
+        Silently refreshes the JWT access token using the httpOnly refresh token cookie.
+        On success: issues new access token + rotated refresh token as updated cookies.
+        On failure (expired/revoked/missing refresh token): returns 401.
+        Rate limited: 10 requests/minute/IP.
+      operationId: refreshToken
+      security: []
+      responses:
+        '200':
+          description: Token pair refreshed successfully
+          headers:
+            Set-Cookie:
+              schema:
+                type: array
+                items:
+                  type: string
+              description: Updated `access_token` and `refresh_token` cookies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Token refreshed"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Invalidate session and sign out
+      description: |
+        Revokes the current refresh token (adds hash to Redis revocation set, removes DB record).
+        Clears `access_token`, `refresh_token`, and `csrf_token` cookies.
+        Returns 200 regardless of whether the user was actually authenticated (idempotent).
+      operationId: logout
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Signed out successfully
+          headers:
+            Set-Cookie:
+              schema:
+                type: array
+                items:
+                  type: string
+              description: Clears all auth cookies (Max-Age=0)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Signed out successfully"
+
+  # ─── MOVIES ─────────────────────────────────────────────────────────────────
+
+  /movies:
+    get:
+      tags: [Movies]
+      summary: List and search movies
+      description: |
+        Returns a paginated list of movies from the local cache (PostgreSQL).
+        If `q` is provided, performs trigram search on movie titles.
+        If no local movies match a search query, falls back to a TMDB API search
+        and caches the results locally.
+        TMDB "Popular" movies are returned when no query/filters are applied (page 1).
+      operationId: listMovies
+      security: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+          description: Search query (title search)
+          example: "batman"
+        - name: genre
+          in: query
+          schema:
+            type: integer
+          description: Filter by TMDB genre ID
+          example: 28
+        - name: yearFrom
+          in: query
+          schema:
+            type: integer
+            minimum: 1888
+            maximum: 2100
+          description: Filter movies released from this year (inclusive)
+          example: 2000
+        - name: yearTo
+          in: query
+          schema:
+            type: integer
+            minimum: 1888
+            maximum: 2100
+          description: Filter movies released up to this year (inclusive)
+          example: 2020
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [popularity, rating, year_desc, year_asc, title_asc]
+            default: popularity
+          description: Sort order
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: Movie list
+          headers:
+            X-RateLimit-Limit:
+              schema: { type: integer }
+            X-RateLimit-Remaining:
+              schema: { type: integer }
+            X-RateLimit-Reset:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MovieCard'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+                  tmdbFallback:
+                    type: boolean
+                    description: True if results came from TMDB API rather than local cache
+                    example: false
+
+    post:
+      tags: [Movies]
+      summary: Add movie from TMDB (admin)
+      description: |
+        Fetches movie metadata from TMDB by `tmdbId` and stores it in the local catalogue.
+        Returns 409 if the movie is already in the catalogue.
+        Admin only (FR-080).
+      operationId: createMovie
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MovieCreateRequest'
+      responses:
+        '201':
+          description: Movie added to catalogue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovieDetail'
+        '400':
+          description: Invalid TMDB ID or TMDB returned no result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /movies/{id}:
+    parameters:
+      - $ref: '#/components/parameters/movieId'
+
+    get:
+      tags: [Movies]
+      summary: Get movie detail
+      description: |
+        Returns full movie detail including TMDB metadata, aggregate community rating,
+        and genre list. Reviews are fetched separately via GET /movies/{id}/reviews.
+      operationId: getMovie
+      security: []
+      responses:
+        '200':
+          description: Movie detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovieDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Movies]
+      summary: Update movie (admin)
+      description: |
+        Allows admin to set an editorial note or override locally editable fields.
+        TMDB metadata fields (title, poster, etc.) are NOT updated here — use POST /movies/{id}/sync.
+        Admin only (FR-081, FR-083).
+      operationId: updateMovie
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MovieUpdateRequest'
+      responses:
+        '200':
+          description: Movie updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovieDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Movies]
+      summary: Delete movie from catalogue (admin)
+      description: |
+        Permanently removes the movie and all associated reviews and ratings (cascade).
+        Admin must confirm intent via the `X-Confirm-Delete: true` header.
+        Admin only (FR-082).
+      operationId: deleteMovie
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: X-Confirm-Delete
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: ["true"]
+          description: Safety header — must be set to "true" to confirm destructive delete
+      responses:
+        '204':
+          description: Movie deleted successfully
+        '400':
+          description: Missing confirmation header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /movies/{id}/sync:
+    parameters:
+      - $ref: '#/components/parameters/movieId'
+
+    post:
+      tags: [Movies]
+      summary: Trigger TMDB metadata refresh (admin)
+      description: |
+        Fetches the latest metadata from TMDB for this movie and updates the local record.
+        Updates `cached_at`. Admin only (FR-081).
+      operationId: syncMovie
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Metadata refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovieDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: TMDB API unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                statusCode: 502
+                message: "TMDB API is currently unavailable. Stale data retained."
+
+  # ─── REVIEWS ────────────────────────────────────────────────────────────────
+
+  /movies/{id}/reviews:
+    parameters:
+      - $ref: '#/components/parameters/movieId'
+
+    get:
+      tags: [Reviews]
+      summary: List reviews for a movie
+      description: |
+        Returns all publicly visible reviews (is_hidden=false, deleted_at=null) for a movie,
+        sorted newest-first. Paginated.
+        Admins also see hidden reviews (indicated by isHidden=true in the response).
+      operationId: listReviews
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: Review list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Review'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags: [Reviews]
+      summary: Create review for a movie
+      description: |
+        Submits a new text review for a movie. One review per user per movie.
+        Returns 409 if the user has already submitted a review.
+        Rate limited: 20 requests/hour/user.
+        Requires authentication (FR-050).
+      operationId: createReview
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewCreateRequest'
+      responses:
+        '201':
+          description: Review created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /reviews/{id}:
+    parameters:
+      - $ref: '#/components/parameters/reviewId'
+
+    put:
+      tags: [Reviews]
+      summary: Edit own review
+      description: |
+        Updates the body of the authenticated user's review.
+        Only the review author can edit their own review.
+        Returns 403 if the requesting user is not the review author.
+        `updatedAt` is set to now(); the edit timestamp is displayed in the UI.
+        Requires authentication (FR-053).
+      operationId: updateReview
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewUpdateRequest'
+      responses:
+        '200':
+          description: Review updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+    delete:
+      tags: [Reviews]
+      summary: Delete review (own or admin)
+      description: |
+        Permanently deletes a review.
+        Review authors can delete their own reviews (FR-054).
+        Admins can delete any review (FR-071).
+        Admin deletions are recorded in the audit log.
+        Returns 403 if the requester is neither the author nor an admin.
+      operationId: deleteReview
+      security:
+        - cookieAuth: []
+      responses:
+        '204':
+          description: Review deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /reviews/{id}/moderate:
+    parameters:
+      - $ref: '#/components/parameters/reviewId'
+
+    post:
+      tags: [Reviews, Admin]
+      summary: Moderate a review (admin)
+      description: |
+        Admin action: hide, restore, or permanently delete a review.
+        All moderation actions are recorded in the audit log (FR-076).
+        Admin only.
+      operationId: moderateReview
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewModerationRequest'
+      responses:
+        '200':
+          description: Moderation action applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  review:
+                    $ref: '#/components/schemas/Review'
+                  auditLog:
+                    $ref: '#/components/schemas/AuditLogEntry'
+        '204':
+          description: Review permanently deleted (when action=delete)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /reviews/{id}/flag:
+    parameters:
+      - $ref: '#/components/parameters/reviewId'
+
+    post:
+      tags: [Reviews]
+      summary: Flag a review as inappropriate
+      description: |
+        Allows a registered user to flag a review. One flag per user per review.
+        Increments `reviews.flag_count`. Flagged reviews appear in admin moderation queue.
+        Returns 409 if the user has already flagged this review (FR-074).
+      operationId: flagReview
+      security:
+        - cookieAuth: []
+      responses:
+        '201':
+          description: Review flagged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Review flagged for moderation"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    delete:
+      tags: [Reviews]
+      summary: Remove own flag from a review
+      description: Allows a registered user to remove their own flag from a review.
+      operationId: unflagReview
+      security:
+        - cookieAuth: []
+      responses:
+        '204':
+          description: Flag removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ─── RATINGS ────────────────────────────────────────────────────────────────
+
+  /movies/{id}/rating:
+    parameters:
+      - $ref: '#/components/parameters/movieId'
+
+    post:
+      tags: [Ratings]
+      summary: Submit or update rating for a movie
+      description: |
+        Upserts a star rating (1-5) for the authenticated user on a specific movie.
+        If the user has already rated this movie, the existing rating is replaced.
+        Triggers recalculation of `movies.avg_rating` and `movies.rating_count` via DB trigger.
+        Requires authentication (FR-040, FR-041).
+      operationId: upsertRating
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RatingUpsertRequest'
+      responses:
+        '200':
+          description: Rating submitted or updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rating:
+                    $ref: '#/components/schemas/Rating'
+                  movieAvgRating:
+                    type: number
+                    format: float
+                    description: Updated aggregate rating for the movie
+                    example: 4.3
+                  movieRatingCount:
+                    type: integer
+                    description: Updated total rating count
+                    example: 248
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+    delete:
+      tags: [Ratings]
+      summary: Delete own rating for a movie
+      description: |
+        Removes the authenticated user's rating for a movie.
+        Triggers recalculation of the movie's aggregate rating.
+        Returns 404 if the user has not rated this movie (FR-043).
+      operationId: deleteRating
+      security:
+        - cookieAuth: []
+      responses:
+        '204':
+          description: Rating deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /movies/{id}/rating/me:
+    parameters:
+      - $ref: '#/components/parameters/movieId'
+
+    get:
+      tags: [Ratings]
+      summary: Get own rating for a movie
+      description: |
+        Returns the authenticated user's current rating for a specific movie.
+        Returns 404 if the user has not yet rated this movie.
+      operationId: getMyRating
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: User's rating
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rating'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: User has not rated this movie
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                statusCode: 404
+                message: "No rating found for this movie"
+
+  # ─── USERS ──────────────────────────────────────────────────────────────────
+
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get own profile
+      description: Returns the authenticated user's full profile including email and admin status.
+      operationId: getMe
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Own profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserMe'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    delete:
+      tags: [Users]
+      summary: Delete own account (GDPR erasure)
+      description: |
+        Permanently deletes the authenticated user's account and ALL associated data:
+        reviews, ratings, refresh tokens, and flags.
+        Executed in a single DB transaction.
+        On success: clears all auth cookies and returns 204.
+        The user must confirm by sending `X-Confirm-Delete: true` header (FR-062).
+      operationId: deleteMe
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: X-Confirm-Delete
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: ["true"]
+          description: Safety confirmation header
+      responses:
+        '204':
+          description: Account and all data permanently deleted
+          headers:
+            Set-Cookie:
+              schema:
+                type: array
+                items:
+                  type: string
+              description: Clears all auth cookies
+        '400':
+          description: Missing confirmation header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/me/export:
+    get:
+      tags: [Users]
+      summary: Export own data (GDPR data portability)
+      description: |
+        Returns a JSON export of all personal data: profile, all reviews, all ratings.
+        Sets Content-Disposition header for file download.
+        Rate limited: 1 export per hour per user (FR-063, NFR-062).
+      operationId: exportMyData
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Data export
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="my-data-export-2026-05-23.json"'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDataExport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/userId'
+
+    get:
+      tags: [Users]
+      summary: Get public user profile
+      description: |
+        Returns a user's public profile: display name, avatar, member since date,
+        and their list of submitted reviews with movie links.
+        Does not expose email. Does not expose reviews by deleted users.
+        (FR-060, FR-061).
+      operationId: getUserProfile
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: Public user profile with reviews
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, reviews, meta]
+                properties:
+                  user:
+                    $ref: '#/components/schemas/UserPublic'
+                  reviews:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Review'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ─── ADMIN ──────────────────────────────────────────────────────────────────
+
+  /admin/reviews:
+    get:
+      tags: [Admin]
+      summary: Admin moderation queue
+      description: |
+        Returns all reviews (including hidden) in the moderation queue.
+        Filterable by status and sortable. Admin only (FR-070).
+      operationId: adminListReviews
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            type: string
+            enum: [all, flagged, hidden, recent]
+            default: all
+          description: Filter moderation queue
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [newest, most_flagged]
+            default: newest
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: Moderation queue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Review'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/movies:
+    get:
+      tags: [Admin]
+      summary: Admin movie management list
+      description: Returns all movies in the local catalogue with management metadata (cached_at, ratingCount). Admin only.
+      operationId: adminListMovies
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: stale
+          in: query
+          schema:
+            type: boolean
+          description: Filter to only movies with stale TMDB data (cached_at older than 24h)
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: Movie management list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MovieDetail'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: Admin user management list
+      description: Returns all registered users with admin status. Admin only (FR-084).
+      operationId: adminListUsers
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: Search by display name or email
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserMe'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{userId}/role:
+    parameters:
+      - $ref: '#/components/parameters/userId'
+
+    patch:
+      tags: [Admin]
+      summary: Promote or demote user admin role
+      description: |
+        Sets the `isAdmin` flag on a user account.
+        Cannot demote self if sole remaining admin (FR-085).
+        Recorded in audit log.
+        Admin only (FR-084).
+      operationId: updateUserRole
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRoleUpdateRequest'
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserMe'
+        '400':
+          description: Cannot demote sole admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                statusCode: 400
+                message: "Cannot revoke admin status: you are the only administrator"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/audit-log:
+    get:
+      tags: [Admin]
+      summary: View audit log
+      description: Returns the admin action audit log, chronological descending. Admin only (FR-076).
+      operationId: getAuditLog
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: adminUserId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by admin user
+        - name: actionType
+          in: query
+          schema:
+            type: string
+            enum:
+              - REVIEW_DELETED
+              - REVIEW_HIDDEN
+              - REVIEW_RESTORED
+              - MOVIE_ADDED
+              - MOVIE_UPDATED
+              - MOVIE_DELETED
+              - MOVIE_SYNCED
+              - USER_PROMOTED
+              - USER_DEMOTED
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLogEntry'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAGS
+# ─────────────────────────────────────────────────────────────────────────────
+
+tags:
+  - name: Health
+    description: Service health check
+  - name: Authentication
+    description: Google OAuth 2.0 flow and token lifecycle
+  - name: Movies
+    description: Movie browsing, search, and management
+  - name: Reviews
+    description: User text reviews
+  - name: Ratings
+    description: User star ratings (1-5)
+  - name: Users
+    description: User profile and GDPR operations
+  - name: Admin
+    description: Admin-only management endpoints (require isAdmin role)

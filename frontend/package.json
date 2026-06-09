@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3001",
-    "build": "next build",
+    "build": "next build --legacy-peer-deps",
     "start": "next start -p 3001",
     "lint": "eslint .",
     "test": "jest --passWithNoTests",
@@ -34,8 +34,11 @@
     "tailwind-merge": "2.3.0",
     "zod": "3.23.8"
   },
+  "overrides": {
+    "eslint-plugin-react-hooks": "^5.2.0"
+  },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
+    "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "6.4.6",
     "@testing-library/react": "16.0.0",

@@ -6,4 +6,5 @@ module.exports = {
   transform: { '^.+\\.(t|j)s$': 'ts-jest' },
   testEnvironment: 'node',
   setupFilesAfterEnv: ['./test/integration/setup.ts'],
+  forceExit: true,
 };

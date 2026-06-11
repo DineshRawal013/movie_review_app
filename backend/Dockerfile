@@ -10,6 +10,7 @@ CMD ["npm", "run", "start:dev"]
 
 FROM base AS builder
 COPY . .
+RUN npx prisma generate
 RUN npm run build
 
 FROM node:20-alpine AS production

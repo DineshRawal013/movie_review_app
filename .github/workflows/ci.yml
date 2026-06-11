@@ -76,7 +76,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci_test_secret
       JWT_REFRESH_SECRET: ci_test_refresh_secret
-      TMDB_API_KEY: fake_key
+      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
       GOOGLE_CLIENT_ID: fake_id
       GOOGLE_CLIENT_SECRET: fake_secret
       GOOGLE_CALLBACK_URL: http://localhost:3000/api/auth/google/callback
